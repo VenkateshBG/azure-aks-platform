@@ -41,8 +41,14 @@ grafana:
   # adminPassword is passed on the command line by scripts/install-monitoring.sh (never committed)
   persistence: { enabled: false }
   resources:
-    requests: { cpu: 50m, memory: 128Mi }
-    limits: { cpu: 300m, memory: 256Mi }
+    requests: { cpu: 100m, memory: 192Mi }
+    limits: { cpu: 1000m, memory: 512Mi }
+  # Grafana loads ~20 bundled plugins at startup (slow on small nodes): give liveness time
+  livenessProbe:
+    httpGet: { path: /api/health, port: 3000 }
+    initialDelaySeconds: 240
+    timeoutSeconds: 30
+    failureThreshold: 10
   sidecar:
     dashboards:
       enabled: true
