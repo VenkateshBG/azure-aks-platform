@@ -37,8 +37,8 @@ resource "azurerm_kubernetes_cluster" "this" {
 
   # Upgrades need an extra "surge" node, which the 4-vCPU quota can't provide.
   # Turn automatic upgrades off so nothing tries to surge behind your back.
-  automatic_upgrade_channel = "none"
-  node_os_upgrade_channel   = "Unmanaged"
+  # automatic_upgrade_channel left unset = no automatic cluster upgrades
+  node_os_upgrade_channel = "Unmanaged"
 
   oidc_issuer_enabled       = true # needed for workload identity
   workload_identity_enabled = true
