@@ -1,0 +1,89 @@
+# Azure DevOps version of the same pipeline (the GitHub Actions workflows are the primary CI/CD).
+# Setup (one time, in the Azure DevOps UI):
+#   1. Project settings > Service connections > New > Azure Resource Manager >
+#      "Workload identity federation (automatic)" > scope to your subscription > name it: sc-aks-platform
+#      (OIDC again - no secret stored). Give its service principal the same roles as the GitHub one:
+#      Contributor + User Access Administrator on the subscription.
+#   2. Pipelines > New pipeline > point at this file. Add pipeline variables TF_STATE_RG, TF_STATE_SA, ALERT_EMAIL.
+trigger:
+  branches: { include: [main] }
+  paths: { include: [app, k8s, terraform, scripts] }
+
+pr:
+  branches: { include: [main] }
+
+pool:
+  vmImage: ubuntu-latest   # Microsoft-hosted: your org has 1 free parallel job / 1800 min per month
+
+variables:
+  azureServiceConnection: sc-aks-platform
+  RG: rg-aksplat-dev
+  AKS: aks-aksplat-dev
+
+stages:
+  - stage: Validate
+    jobs:
+      - job: app
+        displayName: App - lint, test, build
+        steps:
+          - task: UsePythonVersion@0
+            inputs: { versionSpec: "3.12" }
+          - script: |
+              pip install -r app/requirements-dev.txt
+              cd app && ruff check . && pytest -q
+            displayName: Lint and unit tests
+          - script: docker build -t aks-platform-api:ci app
+            displayName: Build image (not pushed)
+
+      - job: terraform
+        displayName: Terraform fmt, validate, plan
+        steps:
+          - task: TerraformInstaller@1
+            inputs: { terraformVersion: latest }
+          - task: AzureCLI@2
+            displayName: terraform plan
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true   # exposes servicePrincipalId, tenantId, idToken for OIDC
+              workingDirectory: terraform/envs/dev
+              inlineScript: |
+                export ARM_USE_OIDC=true ARM_CLIENT_ID=$servicePrincipalId ARM_TENANT_ID=$tenantId \
+                       ARM_OIDC_TOKEN=$idToken ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+                export TF_VAR_alert_email="$(ALERT_EMAIL)"
+                terraform fmt -check -recursive ../..
+                terraform init -input=false \
+                  -backend-config="resource_group_name=$(TF_STATE_RG)" \
+                  -backend-config="storage_account_name=$(TF_STATE_SA)" \
+                  -backend-config="container_name=tfstate" -backend-config="key=dev.terraform.tfstate"
+                terraform validate
+                terraform plan -input=false -lock-timeout=120s
+
+  - stage: BuildAndDeployDev
+    displayName: Build, push and deploy to dev
+    dependsOn: Validate
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: deploy_dev
+        displayName: Deploy to dev
+        environment: dev        # Pipelines > Environments > dev (add an Approval check here for prod-like gates)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: AzureCLI@2
+                  displayName: Build, push image and deploy
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      ACR=$(az acr list -g "$(RG)" --query '[0].name' -o tsv)
+                      SERVER=$(az acr show -n "$ACR" --query loginServer -o tsv)
+                      az acr login --name "$ACR"
+                      docker build -t "$SERVER/aks-platform-api:$(Build.SourceVersion)" app
+                      docker push "$SERVER/aks-platform-api:$(Build.SourceVersion)"
+                      RG="$(RG)" AKS="$(AKS)" ./scripts/deploy.sh dev "$(Build.SourceVersion)"

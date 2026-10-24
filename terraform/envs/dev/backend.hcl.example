@@ -1,0 +1,5 @@
+# Copy to backend.hcl (git-ignored). Values come from `terraform output` in terraform/bootstrap.
+resource_group_name  = "rg-aksplat-tfstate"
+storage_account_name = "REPLACE_ME"
+container_name       = "tfstate"
+key                  = "dev.terraform.tfstate"

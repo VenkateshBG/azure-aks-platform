@@ -1,0 +1,48 @@
+# Wires the app into Prometheus: scrape config (ServiceMonitor) + one alert (PrometheusRule).
+# Apply AFTER kube-prometheus-stack is installed (it provides the CRDs).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: aks-platform-api
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: aks-platform
+spec:
+  namespaceSelector:
+    matchNames: [demo-dev, demo-prod]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aks-platform-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: aks-platform-api
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: aks-platform
+spec:
+  groups:
+    - name: aks-platform-api
+      rules:
+        - alert: ApiHighErrorRate
+          expr: |
+            sum(rate(http_requests_total{job="aks-platform-api", status="5xx"}[5m]))
+              /
+            sum(rate(http_requests_total{job="aks-platform-api"}[5m])) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "More than 5% of API requests are failing (5xx)"
+        - alert: ApiDown
+          expr: absent(up{job="aks-platform-api"} == 1)
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "No healthy aks-platform-api target is being scraped"

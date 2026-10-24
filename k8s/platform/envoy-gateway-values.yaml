@@ -1,0 +1,10 @@
+# Helm values for Envoy Gateway (the Gateway API controller).
+deployment:
+  envoyGateway:
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 192Mi

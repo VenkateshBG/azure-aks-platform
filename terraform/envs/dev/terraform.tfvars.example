@@ -1,0 +1,4 @@
+# Copy to terraform.tfvars (git-ignored) and edit
+location       = "centralindia"
+alert_email    = "you@example.com"
+budget_amount  = 5000 # in billing currency

@@ -1,0 +1,50 @@
+# Trimmed kube-prometheus-stack for a 2 x (2 vCPU / 4 GiB) cluster.
+# Install:  helm install monitoring prometheus-community/kube-prometheus-stack -n monitoring -f this-file
+fullnameOverride: monitoring
+
+alertmanager:
+  enabled: false # alerts are visible in Prometheus/Grafana; saves memory
+
+# AKS manages the control plane, so these targets are unreachable - disable the noise
+kubeEtcd: { enabled: false }
+kubeScheduler: { enabled: false }
+kubeControllerManager: { enabled: false }
+kubeProxy: { enabled: false }
+
+prometheus:
+  prometheusSpec:
+    retention: 2d
+    # Pick up ServiceMonitors / PrometheusRules from every namespace, not only this Helm release
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests: { cpu: 100m, memory: 400Mi }
+      limits: { cpu: 500m, memory: 700Mi }
+
+prometheusOperator:
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { cpu: 200m, memory: 128Mi }
+
+kube-state-metrics:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { cpu: 100m, memory: 96Mi }
+
+prometheus-node-exporter:
+  resources:
+    requests: { cpu: 10m, memory: 16Mi }
+    limits: { cpu: 100m, memory: 48Mi }
+
+grafana:
+  # adminPassword is passed on the command line by scripts/install-monitoring.sh (never committed)
+  persistence: { enabled: false }
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: 300m, memory: 256Mi }
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"

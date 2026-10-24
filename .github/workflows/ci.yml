@@ -1,0 +1,122 @@
+name: CI
+
+# Runs on every pull request and on pushes to main. Nothing here changes Azure.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    name: App - lint, test, build, scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: app/requirements-dev.txt
+      - name: Install dependencies
+        working-directory: app
+        run: pip install -r requirements-dev.txt
+      - name: Lint (ruff)
+        working-directory: app
+        run: ruff check .
+      - name: Unit tests (pytest)
+        working-directory: app
+        run: pytest -q
+      - name: Build image (not pushed)
+        run: docker build -t aks-platform-api:ci app
+      - name: Scan image for vulnerabilities (Trivy)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.58.1 \
+            image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --exit-code 0 aks-platform-api:ci
+          echo "--- gate: fail the build on CRITICAL findings ---"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.58.1 \
+            image --scanners vuln --ignore-unfixed --severity CRITICAL --exit-code 1 --quiet aks-platform-api:ci
+
+  manifests:
+    name: Kubernetes manifests - build and validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build both overlays with dummy values and schema-validate them
+        env:
+          ACR_LOGIN_SERVER: example.azurecr.io
+          IMAGE_TAG: ci
+          KEYVAULT_NAME: kv-example
+          TENANT_ID: 00000000-0000-0000-0000-000000000000
+          CSI_CLIENT_ID: 00000000-0000-0000-0000-000000000000
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          for env in dev prod; do
+            echo "::group::overlay $env"
+            kubectl kustomize k8s/overlays/$env \
+              | envsubst '$ACR_LOGIN_SERVER $IMAGE_TAG $KEYVAULT_NAME $TENANT_ID $CSI_CLIENT_ID' \
+              | ./kubeconform -strict -summary -ignore-missing-schemas \
+                  -schema-location default \
+                  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+            echo "::endgroup::"
+          done
+
+  terraform:
+    name: Terraform - fmt, validate, plan
+    # PRs only: on main the apply workflow owns the state lock
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write       # lets the job request an OIDC token for Azure
+      contents: read
+      pull-requests: write  # to post the plan as a PR comment
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_location: ${{ vars.AZURE_LOCATION }}
+      TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+      TF_IN_AUTOMATION: "true"
+    defaults:
+      run:
+        working-directory: terraform/envs/dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - name: Format check
+        run: terraform fmt -check -recursive ../..
+      - name: Init
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${{ vars.TF_STATE_RG }}" \
+            -backend-config="storage_account_name=${{ vars.TF_STATE_SA }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=dev.terraform.tfstate"
+      - name: Validate
+        run: terraform validate
+      - name: Plan
+        id: plan
+        run: |
+          set -o pipefail
+          terraform plan -input=false -no-color -lock-timeout=120s -out=tfplan | tee plan.txt
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let plan = fs.readFileSync('terraform/envs/dev/plan.txt', 'utf8');
+            if (plan.length > 60000) plan = plan.slice(0, 60000) + '\n... (truncated)';
+            const body = `### Terraform plan\n<details><summary>Show plan</summary>\n\n\`\`\`\n${plan}\n\`\`\`\n</details>`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number, body });

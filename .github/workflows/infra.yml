@@ -1,0 +1,60 @@
+name: Infrastructure (Terraform apply / destroy)
+
+# Applies Terraform when infra code changes on main, or on demand.
+# The `dev` GitHub Environment can require a manual approval before this runs.
+on:
+  push:
+    branches: [main]
+    paths: ["terraform/**"]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "apply or destroy"
+        type: choice
+        options: [apply, destroy]
+        default: apply
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: terraform-dev
+  cancel-in-progress: false  # never cancel an apply halfway
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_location: ${{ vars.AZURE_LOCATION }}
+      TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+      TF_IN_AUTOMATION: "true"
+    defaults:
+      run:
+        working-directory: terraform/envs/dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - name: Init
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${{ vars.TF_STATE_RG }}" \
+            -backend-config="storage_account_name=${{ vars.TF_STATE_SA }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=dev.terraform.tfstate"
+      - name: Apply
+        if: github.event_name == 'push' || inputs.action == 'apply'
+        run: terraform apply -input=false -auto-approve -lock-timeout=120s
+      - name: Destroy
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+        run: terraform destroy -input=false -auto-approve -lock-timeout=120s
+      - name: Show outputs
+        if: github.event_name == 'push' || inputs.action == 'apply'
+        run: terraform output

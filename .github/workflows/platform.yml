@@ -1,0 +1,40 @@
+name: Platform add-ons (Gateway + monitoring)
+
+# Manual, one-time (re-runnable) job that installs the Helm-based add-ons:
+# Envoy Gateway (Gateway API controller) and kube-prometheus-stack (Prometheus + Grafana).
+on:
+  workflow_dispatch:
+    inputs:
+      install_monitoring:
+        description: "Also install Prometheus + Grafana"
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RG: rg-aksplat-dev
+  AKS: aks-aksplat-dev
+
+jobs:
+  platform:
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Get cluster credentials
+        run: az aks get-credentials -g "$RG" -n "$AKS" --overwrite-existing
+      - name: Install Gateway API controller
+        run: ./scripts/install-platform.sh
+      - name: Install monitoring
+        if: inputs.install_monitoring
+        env:
+          GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+        run: ./scripts/install-monitoring.sh
